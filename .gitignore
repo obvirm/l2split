@@ -1,0 +1,11 @@
+/target/
+Cargo.lock
+*.pdb
+
+ui/dist/
+ui/node_modules/
+
+# driver build artifacts (user membangun sendiri dari repo ndislwf)
+*.sys
+*.cat
+driver/ndislwf.inf

@@ -1,0 +1,20 @@
+{
+  "name": "l2split-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && vite build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "lucide": "latest"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}
