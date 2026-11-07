@@ -153,6 +153,8 @@ fn reader_loop(
     let mut bufs: Vec<IntermediateBuffer> = vec![IntermediateBuffer::default(); BATCH];
     let mut lookup = proclookup::build();
     let mut last_probe = std::time::Instant::now();
+    let mut last_rate_check = std::time::Instant::now();
+    let mut frames_since_check: u64 = 0;
 
     while !cancel.load(Ordering::Relaxed) {
         wait_event(ev, 200);
@@ -166,6 +168,7 @@ fn reader_loop(
                 break;
             }
             shared.stats.total.fetch_add(n as u64, Ordering::Relaxed);
+            frames_since_check += n as u64;
             let mut redirect: Vec<bool> = vec![false; n];
             for i in 0..n {
                 let d = bufs[i].get_data();
@@ -212,6 +215,19 @@ fn reader_loop(
             if n < BATCH {
                 break;
             }
+        }
+        if last_rate_check.elapsed() >= std::time::Duration::from_secs(1) {
+            if frames_since_check > 4000 {
+                log_stderr(format!(
+                    "guard rate: {} frame/dtk > 4000, hentikan engine",
+                    frames_since_check
+                ));
+                cancel.store(true, Ordering::Relaxed);
+                reset_event(ev);
+                break;
+            }
+            frames_since_check = 0;
+            last_rate_check = std::time::Instant::now();
         }
         reset_event(ev);
     }
