@@ -298,3 +298,9 @@ pub fn wait_event(
     use windows::Win32::System::Threading::WaitForSingleObject;
     unsafe { WaitForSingleObject(e, ms) };
 }
+
+/// Reset event manual-reset (wajib setelah drain, kalau tidak loop nge-spin).
+pub fn reset_event(e: windows::Win32::Foundation::HANDLE) {
+    use windows::Win32::System::Threading::ResetEvent;
+    let _ = unsafe { ResetEvent(e) };
+}

@@ -10,9 +10,9 @@
 //!     pada adapter LAN (arah bypass).
 use ndisapi::{
     DataLinkLayerFilter, DataLinkLayerFilterUnion, DirectionFlags, Eth8023Filter,
-    Eth802_3FilterFlags, EthMRequestMut, FilterLayerFlags,
-    FILTER_PACKET_REDIRECT, IntermediateBuffer, Ndisapi, StaticFilter, StaticFilterTable,
-    ETH_802_3,
+    Eth802_3FilterFlags, EthMRequestMut, FilterFlags, FilterLayerFlags,
+    FILTER_PACKET_PASS, FILTER_PACKET_REDIRECT, IntermediateBuffer, Ndisapi, StaticFilter,
+    StaticFilterTable, ETH_802_3,
 };
 use windows::Win32::Foundation::HANDLE;
 
@@ -79,6 +79,7 @@ impl NdisDevice {
 
     /// Pasang filter kernel: semua TX ke dst_mac diumpankan ke user-mode
     /// (REDIRECT). Frame lain jalan melancong tanpa menyentuh user-mode.
+    /// Baris PASS default wajib — tanpa itu frame yang tak match di-drop.
     pub fn capture_tx(&self, dst_mac: [u8; 6]) -> Result<(), String> {
         let filter = StaticFilter::new(
             0u64,
@@ -99,10 +100,75 @@ impl NdisDevice {
             ndisapi::NetworkLayerFilter::default(),
             ndisapi::TransportLayerFilter::default(),
         );
-        let table = StaticFilterTable::<1>::from_filters([filter]);
+        let pass_all = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_RECEIVE | DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_PASS,
+            FilterLayerFlags::empty(),
+            DataLinkLayerFilter::default(),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let table = StaticFilterTable::<2>::from_filters([filter, pass_all]);
         self.inner
             .set_packet_filter_table(&table)
             .map_err(|e| format!("set_filter: {e}"))
+    }
+
+    /// Pasang filter kernel: SEMUA TX frame diumpankan ke user-mode (REDIRECT)
+    /// + baris PASS default. Diagnostik apakah jalur TX LWF hidup sama sekali.
+    pub fn capture_tx_all(&self) -> Result<(), String> {
+        let all = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_REDIRECT,
+            FilterLayerFlags::empty(),
+            DataLinkLayerFilter::default(),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let pass_all = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_RECEIVE | DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_PASS,
+            FilterLayerFlags::empty(),
+            DataLinkLayerFilter::default(),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let table = StaticFilterTable::<2>::from_filters([all, pass_all]);
+        self.inner
+            .set_packet_filter_table(&table)
+            .map_err(|e| format!("set_filter: {e}"))
+    }
+
+    /// Tabel pass-all (semua frame masuk & lewat kernel tanpa disentuh).
+    pub fn capture_pass(&self) -> Result<(), String> {
+        let pass_all = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_RECEIVE | DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_PASS,
+            FilterLayerFlags::empty(),
+            DataLinkLayerFilter::default(),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let table = StaticFilterTable::<1>::from_filters([pass_all]);
+        self.inner
+            .set_packet_filter_table(&table)
+            .map_err(|e| format!("set_filter: {e}"))
+    }
+
+    /// Mode adapter: frame MSTCP ditahan ke antrian user-mode (uji/lap).
+    pub fn tunnel_tx(&self, handle: HANDLE) -> Result<(), String> {
+        self.inner
+            .set_adapter_mode(handle, FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL)
+            .map_err(|e| format!("mode: {e}"))
+    }
+
+    /// Kembalikan mode adapter ke default.
+    pub fn restore_mode(&self, handle: HANDLE) {
+        let _ = self.inner.set_adapter_mode(handle, FilterFlags::default());
     }
 
     /// Kosongkan tabel filter kernel (saat engine berhenti).
@@ -125,6 +191,25 @@ impl NdisDevice {
     ) -> usize {
         let mut req = EthMRequestMut::<BATCH>::from_iter(handle, bufs.iter_mut());
         self.inner.read_packets::<BATCH>(&mut req).unwrap_or(0)
+    }
+
+    /// Baca dengan laporan error eksplisit (diagnostik).
+    pub fn read_batch_err(
+        &self,
+        handle: HANDLE,
+        bufs: &mut [IntermediateBuffer],
+    ) -> Result<usize, String> {
+        let mut req = EthMRequestMut::<BATCH>::from_iter(handle, bufs.iter_mut());
+        self.inner
+            .read_packets::<BATCH>(&mut req)
+            .map_err(|e| format!("read: {e}"))
+    }
+
+    /// Lihat berapa frame menunggu di antrian adapter.
+    pub fn queue_size(&self, handle: HANDLE) -> Result<u32, String> {
+        self.inner
+            .get_adapter_packet_queue_size(handle)
+            .map_err(|e| format!("queue_size: {e}"))
     }
 
     /// Kirim satu batch frame ke adapter yakni request sudah berisi.

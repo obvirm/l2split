@@ -15,6 +15,9 @@ pub fn run_cli() {
 
     match cmd.as_str() {
         "list" => cmd_list(),
+        "nd" => cmd_nd(),
+        "ndcap" => cmd_ndcap(&args),
+        "ndrun" => cmd_ndrun(&args),
         "apps" => cmd_apps(),
         "driver" => crate::nlclient::cmd_driver_check(),
         "ring" => crate::nlclient::cmd_ring(&args),
@@ -37,6 +40,9 @@ pub fn run_cli() {
             eprintln!("  list");
             eprintln!("  observe <adapter-needle> [secs]");
             eprintln!("  run --from <ad> --to <ad> --app <exe>[,<exe>] [--secs N]");
+            eprintln!("  nd     driver paket + daftar adapter");
+            eprintln!("  ndcap <adapter-needle> --mac X [--secs N --tunnel --raw --alltx --verbose]");
+            eprintln!("  ndrun --from <ad> --to <ad> --app <exe>[,<exe>] [--secs N]");
             std::process::exit(2);
         }
     }
@@ -183,4 +189,232 @@ fn cmd_lookup() {
         let proto = if *is_tcp { "tcp" } else { "udp" };
         println!("  {port:>5}/{proto}  {short}");
     }
+}
+
+/// nd: cek driver paket + daftar adapter TCP/IP-bound (diagnostik).
+fn cmd_nd() {
+    use crate::ndclient::NdisDevice;
+    let d = match NdisDevice::open() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("DRIVER: GAGAL — {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("DRIVER: OK");
+    let ads = d.adapters().expect("gagal enumerate adapter");
+    println!("adapters TCP/IP-bound: {}", ads.len());
+    for a in &ads {
+        println!(
+            "  name={:<30} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            a.name, a.mac[0], a.mac[1], a.mac[2], a.mac[3], a.mac[4], a.mac[5]
+        );
+    }
+}
+
+/// ndcap: pasang static filter dst-MAC (TX), drain ke read, hitung total.
+fn cmd_ndcap(args: &CmdArgs) {
+    use crate::ndclient::{NdisDevice, BATCH};
+    use std::time::{Duration, Instant};
+
+    let needle = args.positional().first().cloned().unwrap_or_default();
+    let secs = args.num("--secs", 3) as u64;
+    let raw = args.flag("--raw");
+    let alltx = args.flag("--alltx");
+    let verbose = args.flag("--verbose");
+    let mac = args.get("--mac").and_then(|s| crate::helpers::parse_mac(&s));
+    if mac.is_none() && !raw && !alltx {
+        eprintln!("--mac wajib untuk mode filter dst-MAC (abaikan dengan --raw atau --alltx)");
+        std::process::exit(2);
+    }
+    let mac = mac.unwrap_or([0u8; 6]);
+    let d = NdisDevice::open().expect("driver");
+    let ads = d.adapters().expect("enumerate");
+    let ti = crate::helpers::resolve(&ads, &needle).expect("adapter tidak ketemu");
+    let h = ads[ti].handle;
+    let tunnel = args.flag("--tunnel");
+    if !raw {
+        if alltx {
+            d.capture_tx_all().expect("filter ALL-TX");
+        } else {
+            d.capture_tx(mac).expect("pasang filter");
+        }
+    }
+    let mut bufs: Vec<ndisapi::IntermediateBuffer> = vec![ndisapi::IntermediateBuffer::default(); BATCH];
+    let ev = crate::helpers::make_event();
+    let _ = d.set_event(h, ev);
+    if tunnel {
+        d.tunnel_tx(h).expect("set mode TUNNEL");
+    }
+    println!(
+        "capture TX dst-MAC={} pada '{}' (tunnel={} raw={} alltx={})",
+        crate::helpers::fmt_mac(&mac),
+        ads[ti].name,
+        tunnel,
+        raw,
+        alltx
+    );
+    let started = Instant::now();
+    let mut total = 0usize;
+    let mut hexed = false;
+    let mut last_err = String::new();
+    while started.elapsed() < Duration::from_secs(secs) {
+        crate::helpers::wait_event(ev, 200);
+        loop {
+            let n = match d.read_batch_err(h, &mut bufs) {
+                Ok(n) => n,
+                Err(e) => {
+                    if last_err != e {
+                        println!("  read err: {e}");
+                        last_err = e;
+                    }
+                    0
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            total += n;
+            for i in 0..n {
+                let b = bufs[i].get_data();
+                let dir = if bufs[i].get_device_flags()
+                    == ndisapi::DirectionFlags::PACKET_FLAG_ON_SEND
+                {
+                    "TX"
+                } else {
+                    "RX"
+                };
+                if verbose {
+                    println!(
+                        "  dir={dir} len={} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} {}",
+                        bufs[i].get_length(),
+                        b[0],
+                        b[1],
+                        b[2],
+                        b[3],
+                        b[4],
+                        b[5],
+                        frame_info(b).unwrap_or_default()
+                    );
+                }
+            }
+            if !hexed {
+                let d32 = &bufs[0].get_data()[..bufs[0].get_data().len().min(32)];
+                println!("  contoh frame head: {d32:02X?}");
+                hexed = true;
+            }
+        }
+        crate::helpers::reset_event(ev);
+        let ks = started.elapsed().as_secs();
+        if ks % 2 == 0 || !hexed {
+            println!("  t={ks}s queue={}", d.queue_size(h).unwrap_or(0));
+        }
+    }
+    d.clear();
+    if tunnel {
+        d.restore_mode(h);
+    }
+    println!(
+        "VERDICT: {total} frame masuk user-mode dalam {secs} detik (queue akhir={})",
+        d.queue_size(h).unwrap_or(0)
+    );
+}
+
+/// Info ringkas ethernet frame (mac asal + ip/proto/port) untuk verbose.
+fn frame_info(b: &[u8]) -> Option<String> {
+    if b.len() < 14 {
+        return None;
+    }
+    let src = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}", b[6], b[7], b[8], b[9], b[10], b[11]);
+    let ets = u16::from_be_bytes([b[12], b[13]]);
+    if ets != 0x0800 {
+        return Some(format!("src={src} evt={ets:04X}"));
+    }
+    let ip = b.get(14..)?;
+    if ip.len() < 20 {
+        return None;
+    }
+    let ihl = ((ip[0] & 0x0F) as usize) * 4;
+    if ip.len() < ihl + 8 {
+        return None;
+    }
+    let proto = ip[9];
+    let dst_ip = format!("{}.{}.{}.{}", ip[16], ip[17], ip[18], ip[19]);
+    if proto == 6 || proto == 17 {
+        let p = &ip[ihl..];
+        Some(format!(
+            "src={src} ip={dst_ip} proto={proto} :{}->{}",
+            u16::from_be_bytes([p[0], p[1]]),
+            u16::from_be_bytes([p[2], p[3]])
+        ))
+    } else {
+        Some(format!("src={src} ip={dst_ip} proto={proto}"))
+    }
+}
+
+/// ndrun: jalankan engine (driver paket) via CLI — uji/otomasi tanpa GUI.
+fn cmd_ndrun(args: &CmdArgs) {
+    use crate::engine::{self, Shared};
+    use crate::ndclient::{AdapterHandle, NdisDevice};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let to_n = args.get("--to").unwrap_or_default();
+    let app = args.get("--app").unwrap_or_default();
+    let secs = args.num("--secs", 15) as u64;
+    let from_arg = args.get("--from").unwrap_or_default();
+
+    if to_n.is_empty() {
+        eprintln!("--to <adapter-needle> wajib (adapter LAN)");
+        std::process::exit(2);
+    }
+    let d = NdisDevice::open().expect("driver");
+    let ads = d.adapters().expect("enumerate");
+    let from_n = if from_arg.is_empty() {
+        crate::helpers::detect_vpn(&ads, &crate::helpers::net_overview())
+            .unwrap_or_else(|| to_n.clone())
+    } else {
+        from_arg
+    };
+    let ti = crate::helpers::resolve(&ads, &to_n).expect("adapter TO tidak ketemu");
+    let target_handle = ads[ti].handle;
+    let gw = crate::helpers::gateway_of(&to_n).expect("TO tidak punya gateway");
+    let to_gw_mac = crate::helpers::mac_of_ip(&gw)
+        .and_then(|m| crate::helpers::parse_mac(&m))
+        .expect("MAC gateway TO tidak diketahui");
+    let from_gw_mac = crate::helpers::gateway_of(&from_n)
+        .and_then(|g| crate::helpers::mac_of_ip(&g))
+        .and_then(|m| crate::helpers::parse_mac(&m))
+        .expect("MAC gateway FROM tidak diketahui");
+
+    let shared = Shared::new();
+    for name in app.split(',') {
+        if !name.trim().is_empty() {
+            shared.set_app(name.trim(), true);
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    println!("engine: from={from_n} to={to_n} apps={app} window={secs}s");
+    let shared2 = shared.clone();
+    let c2 = cancel.clone();
+    let th = AdapterHandle(target_handle);
+    let jh = std::thread::spawn(move || {
+        engine::run(engine::Cfg {
+            from_gw_mac,
+            to_gw_mac,
+            target_handle: th,
+            cancel: c2,
+            shared,
+        })
+    });
+    std::thread::sleep(Duration::from_secs(secs));
+    cancel.store(true, Ordering::Relaxed);
+    let _ = jh.join();
+    println!(
+        "VERDICT: total={} bypassed={} pass_through={}",
+        shared2.stats.total.load(Ordering::Relaxed),
+        shared2.stats.redirected.load(Ordering::Relaxed),
+        shared2.stats.pass_through.load(Ordering::Relaxed)
+    );
 }

@@ -7,7 +7,7 @@
 //!     adapter LAN (send_packets_to_adapter di jalur driver, bukan jalur stack);
 //!   - non-app -> inject apa adanya ke adapter asal (passthrough).
 //! Frame non-IPv4 (ARP dll) di-ppassthrough apa adanya.
-use crate::helpers::{make_event, wait_event};
+use crate::helpers::{make_event, reset_event, wait_event};
 use crate::ndclient::{NdisDevice, SniAdapter, BATCH};
 use crate::proclookup;
 use ndisapi::IntermediateBuffer;
@@ -149,23 +149,23 @@ fn reader_loop(
     if dev.set_event(a.handle, ev).is_err() {
         return;
     }
+    let _ = dev.tunnel_tx(a.handle);
     let mut bufs: Vec<IntermediateBuffer> = vec![IntermediateBuffer::default(); BATCH];
     let mut lookup = proclookup::build();
-    let mut refresh: u64 = 0;
+    let mut last_probe = std::time::Instant::now();
 
     while !cancel.load(Ordering::Relaxed) {
         wait_event(ev, 200);
+        if last_probe.elapsed() > std::time::Duration::from_millis(2500) {
+            last_probe = std::time::Instant::now();
+            lookup = proclookup::build();
+        }
         loop {
             let n = dev.read_batch(a.handle, &mut bufs);
             if n == 0 {
                 break;
             }
             shared.stats.total.fetch_add(n as u64, Ordering::Relaxed);
-            refresh += n as u64;
-            if refresh >= 2048 {
-                refresh = 0;
-                lookup = proclookup::build();
-            }
             let mut redirect: Vec<bool> = vec![false; n];
             for i in 0..n {
                 let d = bufs[i].get_data();
@@ -213,6 +213,8 @@ fn reader_loop(
                 break;
             }
         }
+        reset_event(ev);
     }
+    dev.restore_mode(a.handle);
     let _ = &mut bufs;
 }
