@@ -7,7 +7,7 @@ use crate::helpers::{
     parse_mac, resolve,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use crate::nlclient::NlDevice;
+use crate::ndclient::NdisDevice;
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -114,6 +114,7 @@ fn set_autostart(_app: AppHandle, enabled: bool) -> Result<String, String> {
 
 // ================= driver setup wizard =================
 
+/// Folder yang berisi driver/ndis.msi di samping aplikasi.
 fn driver_scripts_dir() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("path: {e}"))?;
     let dir = exe.parent().ok_or("path parent gagal")?;
@@ -123,64 +124,62 @@ fn driver_scripts_dir() -> Result<std::path::PathBuf, String> {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("driver"),
     ];
     for c in cands {
-        if c.join("prepare.ps1").exists() {
+        if c.join("ndis.msi").exists() {
             return Ok(c);
         }
     }
-    Err("folder driver (prepare.ps1) tidak ditemukan di samping aplikasi".into())
+    Err("folder driver (ndis.msi) tidak ditemukan di samping aplikasi".into())
 }
 
 #[tauri::command(async)]
 fn driver_check() -> bool {
-    NlDevice::open().is_ok()
+    NdisDevice::open().is_ok()
 }
 
+/// Pasang driver paket lewat MSI bawaan: silent install + UAC sekali,
+/// tanpa test signing, tanpa reboot.
 #[tauri::command(async)]
-fn driver_setup(reboot: bool) -> Result<String, String> {
+fn driver_setup() -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let dir = driver_scripts_dir()?;
-    let arg = dir.join("prepare.ps1").to_string_lossy().into_owned();
-    let list = if reboot {
-        format!("@('-NoProfile','-ExecutionPolicy','Bypass','-File','{}','-Reboot')", arg.replace("'", "''"))
-    } else {
-        format!("@('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')", arg.replace("'", "''"))
-    };
-    let cmd = format!("Start-Process powershell.exe -Verb RunAs -ArgumentList {}", list);
+    let msi = dir.join("ndis.msi");
+    let list = format!(
+        "@('/i','{}','/qn')",
+        msi.to_string_lossy().replace("'", "''")
+    );
+    let cmd = format!("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList {}", list);
     std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
+        .output()
         .map_err(|e| format!("elevate: {e}"))?;
-    Ok(if reboot {
-        "UAC diminta — tekan Yes. Setelah testsigning terpasang, komputer akan reboot dan driver dipasang otomatis."
-    } else {
-        "UAC diminta — tekan Yes. Setelah itu lakukan reboot sekali untuk berlaku."
-    }.into())
+    if !NdisDevice::open().is_ok() {
+        return Err(
+            "driver belum aktif — restart komputer sekali lalu coba lagi".into(),
+        );
+    }
+    Ok("Driver terpasang".into())
 }
 
+/// Lepas driver paket lewat MSI bawaan: silent uninstall + UAC sekali.
 #[tauri::command(async)]
-fn driver_teardown(reboot: bool) -> Result<String, String> {
+fn driver_teardown() -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let dir = driver_scripts_dir()?;
-    let arg = dir.join("teardown.ps1").to_string_lossy().into_owned();
-    let list = if reboot {
-        format!("@('-NoProfile','-ExecutionPolicy','Bypass','-File','{}','-Reboot')", arg.replace("'", "''"))
-    } else {
-        format!("@('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')", arg.replace("'", "''"))
-    };
-    let cmd = format!("Start-Process powershell.exe -Verb RunAs -ArgumentList {}", list);
+    let msi = dir.join("ndis.msi");
+    let list = format!(
+        "@('/x','{}','/qn')",
+        msi.to_string_lossy().replace("'", "''")
+    );
+    let cmd = format!("Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList {}", list);
     std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &cmd])
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
+        .output()
         .map_err(|e| format!("elevate: {e}"))?;
-    Ok(if reboot {
-        "UAC diminta — tekan Yes. Driver dilepas, testsigning OFF, lalu reboot."
-    } else {
-        "UAC diminta — tekan Yes. Setelah itu lakukan reboot sekali untuk berlaku."
-    }.into())
+    Ok("Driver dilepas".into())
 }
 
 #[derive(Serialize, Clone)]
@@ -313,7 +312,7 @@ fn add_app_path(app: AppHandle, path: String) -> Result<(), String> {
 #[tauri::command(async)]
 fn get_net(app: AppHandle) -> Result<NetInfo, String> {
     let st = app.state::<AppState>();
-    let d = NlDevice::open().map_err(|e| format!("driver ndislwf: {e} — jalankan driver\\driver.cmd (pilih 3 → reboot → 1)"))?;
+    let d = NdisDevice::open().map_err(|e| format!("driver: {e}"))?;
     let adapters = d.adapters().map_err(|e| format!("enumerate: {e}"))?;
     let overview = net_overview();
     let vpn = detect_vpn(&adapters, &overview).unwrap_or_else(|| "None".into());
@@ -433,7 +432,7 @@ fn engine_bridge(app: &AppHandle) -> Result<(), String> {
     if to_n.is_empty() {
         return Err("LAN adapter belum dipilih (Settings)".into());
     }
-    let d = NlDevice::open().map_err(|e| format!("driver: {e} — pasang lewat folder driver\\: driver.cmd → 3 (testsigning ON) → reboot → 1 (install)"))?;
+    let d = NdisDevice::open().map_err(|e| format!("driver: {e} — pasang lewat wizard instalasi"))?;
     let ads = d.adapters().map_err(|e| format!("enumerate: {e}"))?;
 
     // FROM auto: VPN connected; fallback = TO (no-op)
@@ -441,7 +440,7 @@ fn engine_bridge(app: &AppHandle) -> Result<(), String> {
     let from_n = detect_vpn(&ads, &overview).unwrap_or_else(|| to_n.clone());
 
     let ti = resolve(&ads, &to_n).ok_or("adapter TO tidak ditemukan")?;
-    let _ = ti;
+    let target_handle = ads[ti].handle;
 
     let gw = gateway_of(&to_n).ok_or("TO tidak punya gateway")?;
     let to_gw_mac = mac_of_ip(&gw)
@@ -495,6 +494,7 @@ fn engine_bridge(app: &AppHandle) -> Result<(), String> {
     engine::run(engine::Cfg {
         from_gw_mac,
         to_gw_mac,
+        target_handle: crate::ndclient::AdapterHandle(target_handle),
         cancel,
         shared,
     });

@@ -3,49 +3,40 @@
 **Pick any app — send it straight out the Ethernet, bypassing the VPN. An
 alternative split tunneling.**
 
-Per-application L2 split via NDIS light filter — VPN split tunneling
-per-aplikasi atas driver NDIS murni (`NDISLWF.sys`, proyek
-[ndislwf](https://github.com/obvirm/ndislwf)).
+Per-application L2 split via a pure NDIS light filter driver.
 
-l2split memang **per aplikasi** — identitas app (PID via TCP table) ditentukan di
-user-space, keputusan dibuat di frame Ethernet (L2).
+l2split is **per application** — app identity (PID via TCP table) is decided in
+user-space, per-frame decisions are made at the Ethernet (L2) layer.
 
-**Cara kerja** (tanpa WFP, tanpa Winsock hooking):
+**How it works** (no WFP, no Winsock hooking):
 
-1. Kernel rule (`POLICY`, match dst-MAC gateway VPN) memblokir frame TX
-   menuju VPN — frame tetap jatuh ke ring TX untuk dilihat user-mode.
-2. Engine user-mode membaca ring, menguji frame IPv4/TCP/UDP, dan cari
-   pemilik koneksi lewat `GetExtendedTcpTable` (port sumber → PID → exe).
-3. App masuk whitelist → dst-MAC frame ditulis ulang ke gateway LAN + inject
-   (jalur inject kernel memanggil `NdisFSendNetBufferLists` langsung — tidak
-   kena rule blok lagi) → frame keluar langsung ke internet tanpa VPN.
-4. App lain → inject apa adanya → tetap lewat VPN.
+1. A kernel static filter rule (dst-MAC = VPN gateway, direction TX) holds only
+   frames heading to the VPN — every other frame keeps flowing purely in-kernel.
+2. The user-mode engine reads those held frames, tests IPv4/TCP/UDP, and finds
+   the connection owner via `GetExtendedTcpTable` (source port → PID → exe).
+3. Whitelisted app → the frame's dst-MAC is rewritten to the LAN gateway and
+   injected to the LAN adapter → traffic exits directly to the internet.
+4. Other apps → injected back unchanged → they keep using the VPN.
 
-## Setup sekali (tiap mesin)
+## Setup (once per machine)
 
-Driver yang tidak disertifikasi produksi hanya load saat *test signing*
-aktif. Tombolnya dijalankan sekali per mesin:
+The installer ships a WHQL-signed NDIS filter driver — no test signing, no
+Secure Boot changes, works on stock Windows 10/11:
 
 ```
-1. copy ndislwf.inf / ndislwf.sys / ndislwf.cat (hasil build ndislwf)
-   ke folder driver\
-2. driver\driver.cmd  →  pilih 3 (testsigning ON)  →  reboot
-3. driver\driver.cmd  →  pilih 1 (install driver)
-4. jalankan l2split
+1. run l2split setup.exe
+2. if the driver is missing, the built-in wizard asks once — press
+   "Install driver" and approve the UAC prompt
+3. restart once if asked — done
 ```
 
 ## Teardown
 
-```
-driver\driver.cmd  →  pilih 2 (lepas driver)
-driver\driver.cmd  →  pilih 4 (testsigning off)  →  reboot
-```
+In the app: remove the driver via the wizard/setup menu, or run the bundled
+MSI's uninstaller.
 
-## Catatan
+## Notes
 
-- `driver\driver.cmd` self-elevate (UAC) otomatis.
-- Watermark "Test Mode" muncul di pojok desktop selama testsigning ON —
-  normal, hilang saat tombol dimatikan (pilihan 4).
-- Secure Boot tidak mengizinkan `testsigning`; matikan Secure Boot dulu
-  (BIOS) bila perlu.
-- Legal: driver + app hanya untuk mesin yang kamu miliki/authorize.
+- Only packets of apps you whitelist leave the VPN tunnel; everything else is
+  untouched and stays in the tunnel.
+- Legal: use only on machines you own or are authorized to manage.

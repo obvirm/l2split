@@ -1,6 +1,6 @@
 [package]
 name = "l2split"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Pick any app — send it straight out the Ethernet, bypassing the VPN. An alternative split tunneling (per-app, layer 2)."
 license = "MIT"
@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 png = "0.17"
+ndisapi = "0.7"
 
 [dependencies.windows]
 version = "0.62.2"
@@ -34,7 +35,7 @@ features = [
 ]
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [[bin]]
 name = "l2split"

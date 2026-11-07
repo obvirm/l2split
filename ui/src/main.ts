@@ -479,11 +479,10 @@ window.addEventListener("error", (ev) => {
           <div class="w-10 h-10 rounded-2xl bg-pixel-primaryContainer flex items-center justify-center text-pixel-primary">
             <i data-lucide="plug-zap" class="w-5 h-5"></i>
           </div>
-          <h2 class="font-bold text-sm text-pixel-textPrimary">Driver ndislwf belum terpasang</h2>
+          <h2 class="font-bold text-sm text-pixel-textPrimary">Driver belum terpasang</h2>
         </div>
         <p class="text-xs text-pixel-textSecondary leading-relaxed mb-2">1. Tekan <b>Pasang driver</b>, setujui UAC (<b>Yes</b>).</p>
-        <p class="text-xs text-pixel-textSecondary leading-relaxed mb-2">2. Komputer reboot otomatis — driver terpasang sendiri saat login.</p>
-        <p class="text-xs text-pixel-textSecondary leading-relaxed mb-6">3. Buka l2split lagi — siap pakai.</p>
+        <p class="text-xs text-pixel-textSecondary leading-relaxed mb-2">2. Kalau diminta restart dulu, restart lalu buka l2split lagi.</p>
         <div class="flex gap-3">
           <button id="drv-setup" class="flex-1 px-4 py-3 rounded-xl bg-pixel-primary text-pixel-onPrimary text-xs font-semibold">Pasang driver</button>
           <button id="drv-later" class="px-4 py-3 rounded-xl bg-pixel-surfaceVariant/50 text-pixel-textPrimary text-xs font-medium">Nanti</button>
@@ -492,13 +491,19 @@ window.addEventListener("error", (ev) => {
       </div>`;
     document.body.appendChild(o);
     const msg = o.querySelector<HTMLElement>("#drv-msg");
-    o.querySelector("#drv-setup")?.addEventListener("click", () => {
-      void invoke<string>("driver_setup", { reboot: true })
+    const setupBtn = o.querySelector<HTMLButtonElement>("#drv-setup");
+    setupBtn?.addEventListener("click", () => {
+      if (setupBtn) (setupBtn as HTMLButtonElement).disabled = true;
+      void invoke<string>("driver_setup")
         .then((m) => {
           if (msg) msg.textContent = String(m);
-          pushLog("Driver", true, "prepare.ps1 + RunOnce", String(m));
+          pushLog("Driver", true, "instalasi driver", String(m));
         })
-        .catch((e) => showToast("Gagal", String(e)));
+        .catch((e) => {
+          showToast("Gagal", String(e));
+          if (msg) msg.textContent = String(e);
+          if (setupBtn) (setupBtn as HTMLButtonElement).disabled = false;
+        });
     });
     o.querySelector("#drv-later")?.addEventListener("click", () => o.remove());
   })();

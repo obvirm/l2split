@@ -1,17 +1,19 @@
-//! Engine egress NL: satu ring drain, satu keputusan per frame.
+//! Engine l2split: satu reader per adapter, satu keputusan per frame.
 //!
-//! Model: kernel rule (dst-MAC VPN gateway) memblok frame dari stack yang
-//! menuju VPN dan tetap menaruh frame itu di ring TX; engine memilih frame:
-//!   - owner app masuk whitelist -> rewrite dst-MAC ke gateway LAN + inject
-//!     (jalur inject kernel melewati FilterSend, jadi tidak terblok ulang);
-//!   - non-app -> inject apa adanya (frame kembali ke VPN, passthrough asli).
-//! Tanpa whitelist (apps kosong) semua frame dijalankan ulang apa adanya.
+//! Model: filter kernel (STATIC_FILTER dst-MAC gateway VPN, action REDIRECT)
+//! menahan frame TX yang menuju VPN dan mengumpankannya ke user-mode.
+//! Engine memilih frame:
+//!   - owner app masuk whitelist -> rewrite dst-MAC ke gateway LAN + inject ke
+//!     adapter LAN (send_packets_to_adapter di jalur driver, bukan jalur stack);
+//!   - non-app -> inject apa adanya ke adapter asal (passthrough).
+//! Frame non-IPv4 (ARP dll) di-ppassthrough apa adanya.
+use crate::helpers::{make_event, wait_event};
+use crate::ndclient::{NdisDevice, SniAdapter, BATCH};
 use crate::proclookup;
-use crate::nlclient::{NlDevice, NlMode, NlPolicy, NlPolicyRule, MATCH_DSTMAC, NL_RING_TX, MODE_RX, MODE_TX};
+use ndisapi::IntermediateBuffer;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 /// Statistik live yang dibaca UI kapan saja.
 #[derive(Default)]
@@ -51,8 +53,10 @@ impl Shared {
 pub struct Cfg {
     /// MAC gateway LAN (arah bypass).
     pub to_gw_mac: [u8; 6],
-    /// MAC gateway VPN (arah asli) — jadi rule blok kernel.
+    /// MAC gateway VPN (arah asli) — jadi filter capture kernel.
     pub from_gw_mac: [u8; 6],
+    /// HANDLE adapter LAN untuk inject arah bypass.
+    pub target_handle: crate::ndclient::AdapterHandle,
     pub cancel: Arc<AtomicBool>,
     pub shared: Arc<Shared>,
 }
@@ -87,8 +91,8 @@ fn owner_basename(map: &proclookup::LookupMap, proto: u8, port: u16) -> Option<S
 
 /// Jalankan engine di thread pemanggil, blocking sampai cancel.
 pub fn run(cfg: Cfg) {
-    match NlDevice::open() {
-        Ok(dev) => run_locked(dev, cfg),
+    match NdisDevice::open() {
+        Ok(dev) => run_locked(std::sync::Arc::new(dev), cfg),
         Err(e) => log_stderr(format!("driver: {e}")),
     }
 }
@@ -97,82 +101,118 @@ fn log_stderr(s: String) {
     eprintln!("engine: {s}");
 }
 
-fn run_locked(dev: NlDevice, cfg: Cfg) {
-    // mode TX+RX pada semua adapter agar ring lengkap
-    if let Ok(ads) = dev.adapters() {
-        for a in ads.iter() {
-            let _ = dev.set_mode(NlMode { adapter_index: a.index, flags: MODE_RX | MODE_TX });
+fn run_locked(dev: std::sync::Arc<NdisDevice>, cfg: Cfg) {
+    let ads = match dev.adapters() {
+        Ok(v) => v,
+        Err(e) => {
+            log_stderr(format!("enumerate: {e}"));
+            return;
         }
-    }
-    // rule kernel: blok TX = dst-MAC VPN gateway
-    let mut p = NlPolicy::default();
-    p.count = 1;
-    p.enabled = 1;
-    p.rules[0] = NlPolicyRule {
-        match_bits: MATCH_DSTMAC,
-        dst_mac: cfg.from_gw_mac,
-        ..NlPolicyRule::default()
     };
-    if let Err(e) = dev.set_policy(&p) {
-        log_stderr(format!("set_policy gagal: {e}"));
+    if ads.is_empty() {
+        log_stderr("tidak ada adapter TCP/IP-bound".into());
         return;
     }
+    if let Err(e) = dev.capture_tx(cfg.from_gw_mac) {
+        log_stderr(e);
+        return;
+    }
+
     cfg.shared.running.store(true, Ordering::Relaxed);
+    let mut joins = Vec::new();
+    for a in ads {
+        let dev = dev.clone();
+        let cancel = cfg.cancel.clone();
+        let shared = cfg.shared.clone();
+        let to_gw_mac = cfg.to_gw_mac;
+        let target_handle = cfg.target_handle;
+        joins.push(std::thread::spawn(move || {
+            reader_loop(&dev, a, cancel, shared, to_gw_mac, target_handle);
+        }));
+    }
+    for j in joins {
+        let _ = j.join();
+    }
+    cfg.shared.running.store(false, Ordering::Relaxed);
+    dev.clear();
+}
 
+fn reader_loop(
+    dev: &NdisDevice,
+    a: SniAdapter,
+    cancel: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+    to_gw_mac: [u8; 6],
+    target_handle: crate::ndclient::AdapterHandle,
+) {
+    let ev = make_event();
+    if dev.set_event(a.handle, ev).is_err() {
+        return;
+    }
+    let mut bufs: Vec<IntermediateBuffer> = vec![IntermediateBuffer::default(); BATCH];
     let mut lookup = proclookup::build();
-    let mut seen: u64 = 0;
-    let mut tick = Instant::now();
+    let mut refresh: u64 = 0;
 
-    while !cfg.cancel.load(Ordering::Relaxed) {
-        if let Ok(items) = dev.read_ring(None, 256) {
-            for e in &items {
-                if e.len < 34 || (e.flags & NL_RING_TX) == 0 || e.len as usize > 1514 {
-                    continue;
-                }
-                let data = &e.data[..e.len as usize];
-                seen += 1;
-                cfg.shared.stats.total.fetch_add(1, Ordering::Relaxed);
-
-                if seen % 50 == 0 {
-                    lookup = proclookup::build();
-                }
-                let mut redirected = false;
-                if eth_ipv4(data) {
-                    if let Some((proto, port)) = src_port(data) {
-                        if let Some(owner) = owner_basename(&lookup, proto, port) {
-                            let apps = cfg.shared.apps.lock().unwrap();
-                            if apps.contains(&owner) {
-                                redirected = true;
-                            }
+    while !cancel.load(Ordering::Relaxed) {
+        wait_event(ev, 200);
+        loop {
+            let n = dev.read_batch(a.handle, &mut bufs);
+            if n == 0 {
+                break;
+            }
+            shared.stats.total.fetch_add(n as u64, Ordering::Relaxed);
+            refresh += n as u64;
+            if refresh >= 2048 {
+                refresh = 0;
+                lookup = proclookup::build();
+            }
+            let mut redirect: Vec<bool> = vec![false; n];
+            for i in 0..n {
+                let d = bufs[i].get_data();
+                if let Some((proto, port)) = src_port(d) {
+                    if let Some(owner) = owner_basename(&lookup, proto, port) {
+                        let apps = shared.apps.lock().unwrap();
+                        if apps.contains(&owner) {
+                            redirect[i] = true;
                         }
                     }
                 }
-                let frame: Vec<u8> = if redirected {
-                    let mut f = data.to_vec();
-                    f[0..6].copy_from_slice(&cfg.to_gw_mac);
-                    f
-                } else {
-                    data.to_vec()
-                };
-                if dev.inject(&frame).is_ok() {
-                    if redirected {
-                        cfg.shared.stats.redirected.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        cfg.shared.stats.pass_through.fetch_add(1, Ordering::Relaxed);
-                    }
+                if redirect[i] {
+                    let f = bufs[i].get_data_mut();
+                    f[0..6].copy_from_slice(&to_gw_mac);
                 }
             }
-        }
-        if tick.elapsed() >= Duration::from_secs(1) {
-            tick = Instant::now();
+            let mut to_lan =
+                ndisapi::EthMRequest::<'_, BATCH>::new(target_handle.0);
+            let mut to_src = ndisapi::EthMRequest::<'_, BATCH>::new(a.handle);
+            let mut n_lan = 0usize;
+            let mut n_src = 0usize;
+            for i in 0..n {
+                if redirect[i] {
+                    if to_lan.push(&bufs[i]).is_ok() {
+                        n_lan += 1;
+                    }
+                } else if to_src.push(&bufs[i]).is_ok() {
+                    n_src += 1;
+                }
+            }
+            if n_lan > 0 {
+                let _ = dev.send_batch(&to_lan);
+            }
+            if n_src > 0 {
+                let _ = dev.send_batch(&to_src);
+            }
+            for i in 0..n {
+                if redirect[i] {
+                    shared.stats.redirected.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    shared.stats.pass_through.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if n < BATCH {
+                break;
+            }
         }
     }
-
-    let _ = dev.set_policy(&NlPolicy::default());
-    if let Ok(ads) = dev.adapters() {
-        for a in ads.iter() {
-            let _ = dev.set_mode(NlMode { adapter_index: a.index, flags: 0 });
-        }
-    }
-    cfg.shared.running.store(false, Ordering::Relaxed);
+    let _ = &mut bufs;
 }

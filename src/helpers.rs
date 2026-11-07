@@ -1,6 +1,37 @@
 //! Utilitas bersama: arg parsing + adapter helpers.
 use crate::nlclient::NlAdapter;
 
+/// Sumber nama + MAC untuk adapter (NlAdapter driver kustom / SniAdapter driver paket).
+pub trait AdapterInfo {
+    fn name(&self) -> String;
+    fn mac(&self) -> [u8; 6];
+}
+
+impl AdapterInfo for NlAdapter {
+    fn name(&self) -> String {
+        String::from_utf16_lossy(
+            self.ifname
+                .iter()
+                .take_while(|c| **c != 0)
+                .map(|c| *c)
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
+    }
+    fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+}
+
+impl AdapterInfo for crate::ndclient::SniAdapter {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn mac(&self) -> [u8; 6] {
+        self.mac
+    }
+}
+
 /// Parser argumen sederhana: `--key value` dan flag `--flag`.
 pub struct CmdArgs {
     args: Vec<String>,
@@ -62,19 +93,19 @@ impl CmdArgs {
 
 /// Decode nama adapter (utf16 null-terminated) dari NlAdapter.
 pub fn adapter_name(a: &NlAdapter) -> String {
-    String::from_utf16_lossy(
-        a.ifname.iter().take_while(|c| **c != 0).map(|c| *c).collect::<Vec<_>>().as_slice(),
-    )
+    a.name()
 }
 
 /// Cari index adapter berdasarkan substring nama (case-insensitive).
-pub fn resolve(adapters: &[NlAdapter], needle: &str) -> Option<usize> {
-    adapters.iter().position(|a| adapter_name(a).to_lowercase().contains(&needle.to_lowercase()))
+pub fn resolve<T: AdapterInfo>(adapters: &[T], needle: &str) -> Option<usize> {
+    adapters
+        .iter()
+        .position(|a| a.name().to_lowercase().contains(&needle.to_lowercase()))
 }
 
 /// Nama adapter pada index tertentu.
-pub fn friendly(adapters: &[NlAdapter], i: usize) -> String {
-    adapter_name(&adapters[i])
+pub fn friendly<T: AdapterInfo>(adapters: &[T], i: usize) -> String {
+    adapters[i].name()
 }
 
 /// Ambil IP IPv4 adapter via PowerShell (alias friendly name).
@@ -98,8 +129,8 @@ pub fn adapter_ip(alias: &str) -> Option<String> {
 }
 
 /// MAC address adapter dalam format heks.
-pub fn adapter_mac(a: &NlAdapter) -> String {
-    fmt_mac(&a.mac)
+pub fn adapter_mac<T: AdapterInfo>(a: &T) -> String {
+    fmt_mac(&a.mac())
 }
 
 fn ps(cmd: &str) -> String {
@@ -189,12 +220,12 @@ const VPN_HINTS: &[&str] = &[
 ];
 
 /// Auto-detect adapter VPN: nama cocok pola VPN + punya IP connected (bukan APIPA).
-pub fn detect_vpn(
-    adapters: &[NlAdapter],
+pub fn detect_vpn<T: AdapterInfo>(
+    adapters: &[T],
     overview: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    for i in 0..adapters.len() {
-        let name = friendly(adapters, i);
+    for a in adapters {
+        let name = a.name();
         let low = name.to_lowercase();
         if VPN_HINTS.iter().any(|h| low.contains(h)) {
             if let Some(ip) = overview.get(&name) {
