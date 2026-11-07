@@ -158,10 +158,6 @@ fn reader_loop(
 
     while !cancel.load(Ordering::Relaxed) {
         wait_event(ev, 200);
-        if last_probe.elapsed() > std::time::Duration::from_millis(2500) {
-            last_probe = std::time::Instant::now();
-            lookup = proclookup::build();
-        }
         loop {
             let n = dev.read_batch(a.handle, &mut bufs);
             if n == 0 {
@@ -173,7 +169,13 @@ fn reader_loop(
             for i in 0..n {
                 let d = bufs[i].get_data();
                 if let Some((proto, port)) = src_port(d) {
-                    if let Some(owner) = owner_basename(&lookup, proto, port) {
+                    let mut owner = owner_basename(&lookup, proto, port);
+                    if owner.is_none() && last_probe.elapsed() > std::time::Duration::from_millis(110) {
+                        lookup = proclookup::build();
+                        last_probe = std::time::Instant::now();
+                        owner = owner_basename(&lookup, proto, port);
+                    }
+                    if let Some(owner) = owner {
                         let apps = shared.apps.lock().unwrap();
                         if apps.contains(&owner) {
                             redirect[i] = true;
