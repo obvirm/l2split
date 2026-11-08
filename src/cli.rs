@@ -193,9 +193,9 @@ fn cmd_lookup() {
     }
 }
 
-/// nd: cek driver paket + daftar adapter TCP/IP-bound (diagnostik).
-fn cmd_nd() {    use crate::ndclient::NdisDevice;
-    let d = match NdisDevice::open() {
+/// nd: cek driver + daftar adapter ter-attach (klien NL langsung, \\.\NDISLWF).
+fn cmd_nd() {
+    let dev = match NlDevice::open() {
         Ok(d) => d,
         Err(e) => {
             println!("DRIVER: GAGAL — {e}");
@@ -203,46 +203,53 @@ fn cmd_nd() {    use crate::ndclient::NdisDevice;
         }
     };
     println!("DRIVER: OK");
-    let ads = d.adapters().expect("gagal enumerate adapter");
-    let ads2 = d.adapters().expect("gagal enumerate adapter (2)");
-    println!("adapters TCP/IP-bound: {}", ads.len());
-    for (a, b) in ads.iter().zip(ads2.iter()) {
-        let mode = d.adapter_mode(a.handle).map(|m| format!("0x{m:X}")).unwrap_or_else(|| "fail".into());
-        let hw = d.hw_filter(a.handle).map(|m| format!("0x{m:X}")).unwrap_or_else(|| "fail".into());
-        println!(
-            "  name={:<30} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} h1=0x{:X} h2=0x{:X} {} mode={} hw={} q={}",
-            a.name, a.mac[0], a.mac[1], a.mac[2], a.mac[3], a.mac[4], a.mac[5],
-            a.handle.0 as usize as u64, b.handle.0 as usize as u64,
-            if a.handle.0 == b.handle.0 { "SAMA" } else { "BEDA" },
-            mode, hw,
-            d.queue_size(a.handle).unwrap_or(0),
-        );
+    match dev.version() {
+        Ok(v) if v.magic == crate::nlclient::NL_ABI_MAGIC =>
+            println!("  ABI v{}.{} (magic ok)", v.ver >> 16, v.ver & 0xFFFF),
+        Ok(v) => println!("  ABI GAK COCOK: magic={:#x}", v.magic),
+        Err(e) => println!("  version ioctl gagal: {e}"),
+    }
+    match dev.adapters() {
+        Ok(ads) => {
+            println!("adapters TCP/IP-bound: {}", ads.len());
+            for a in &ads {
+                let nm: String = a.ifname.iter().take_while(|&&c| c != 0)
+                    .map(|c| char::from_u32(*c as u32).unwrap_or('?')).collect();
+                println!(
+                    "  name={:<30} mac={} flags={:#x} idx={}",
+                    nm,
+                    crate::helpers::fmt_mac(&a.mac),
+                    a.flags,
+                    a.index
+                );
+            }
+        }
+        Err(e) => println!("enum gagal: {e}"),
     }
 }
 
-/// ndclear: pemulihan paksa — mode semua adapter dikembalikan ke NORMAL dan
-/// tabel filter dikosongkan. Dipakai uninstaller + manusia saat butuh pulih.
+/// ndclear: pemulihan paksa — mode semua adapter passthrough + ring/filter kernel dikosongkan.
+/// Dipakai uninstaller + manusia saat butuh pulih.
 fn cmd_ndclear() {
-    use crate::ndclient::NdisDevice;
-    let d = match NdisDevice::open() {
+    let dev = match NlDevice::open() {
         Ok(d) => d,
         Err(e) => {
             println!("ndclear: driver tidak bisa dibuka — {e}");
             std::process::exit(1);
         }
     };
-    let ads = match d.adapters() {
-        Ok(v) => v,
-        Err(e) => {
-            println!("ndclear: enumerate gagal — {e}");
-            std::process::exit(1);
+    let mut n = 0usize;
+    if let Ok(ads) = dev.adapters() {
+        for i in 0..ads.len() {
+            if dev.set_mode(NlMode { adapter_index: i as u32, flags: 0 }).is_ok() {
+                n += 1;
+            }
         }
-    };
-    for a in &ads {
-        d.restore_mode(a.handle);
     }
-    d.clear();
-    println!("ndclear: filter dikosongkan + mode NORMAL di {} adapter", ads.len());
+    match dev.clear() {
+        Ok(()) => println!("ndclear: filter dikosongkan + mode passthrough di {} adapter", n),
+        Err(e) => println!("ndclear: CLEAR gagal — {e}"),
+    }
 }
 
 /// ndcap: pasang static filter dst-MAC (TX), drain ke read, hitung total.
