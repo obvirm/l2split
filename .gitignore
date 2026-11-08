@@ -8,4 +8,6 @@ ui/node_modules/
 # driver build artifacts (user membangun sendiri dari repo ndislwf)
 *.sys
 *.cat
+*.cer
 driver/ndislwf.inf
+release-tmp/

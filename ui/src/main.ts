@@ -1,4 +1,4 @@
-// VPN Bypass Bridge — frontend glue (TypeScript + Tailwind via Vite).
+// l2split — frontend glue (TypeScript + Tailwind via Vite).
 // Backend commands: crate l2split (src/gui.rs).
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";

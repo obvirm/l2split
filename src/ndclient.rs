@@ -50,7 +50,7 @@ unsafe impl Sync for NdisDevice {}
 impl NdisDevice {
     /// Buka handel driver. Gagal = driver belum terpasang.
     pub fn open() -> Result<Self, String> {
-        let inner = Ndisapi::new("NDISRD")
+        let inner = Ndisapi::new("NdisLwf")
             .map_err(|e| format!("driver belum siap: {e} — jalankan wizard instalasi driver dulu"))?;
         Ok(Self { inner })
     }
@@ -159,6 +159,43 @@ impl NdisDevice {
             .map_err(|e| format!("set_filter: {e}"))
     }
 
+    /// Mode adapter (FilterFlags) untuk diagnostik; None bila query gagal.
+    pub fn adapter_mode(&self, handle: HANDLE) -> Option<u32> {
+        self.inner.get_adapter_mode(handle).ok().map(|f| f.bits())
+    }
+
+    /// Filter hardware (OID packet filter u32) untuk diagnostik; None bila gagal.
+    pub fn hw_filter(&self, handle: HANDLE) -> Option<u32> {
+        self.inner.get_hw_packet_filter(handle).ok()
+    }
+
+    /// Mode adapter: frame TX MSTCP dicatat ke antrian user-mode dan aslinya
+    /// tetap dikirim adapter (LISTEN). Read hanya copi, bukan jalur tunggal.
+    pub fn listen_tx(&self, handle: HANDLE) -> Result<(), String> {
+        self.inner
+            .set_adapter_mode(handle, FilterFlags::MSTCP_FLAG_SENT_LISTEN)
+            .map_err(|e| format!("mode: {e}"))
+    }
+
+    /// Mode adapter: frame TX MSTCP ditahan ke antrian user-mode (RX tetap
+    /// lewat normal). Tanpa mode ini tabel REDIRECT tidak mengantrekan frame.
+    pub fn tunnel_tx_sent(&self, handle: HANDLE) -> Result<(), String> {
+        self.inner
+            .set_adapter_mode(handle, FilterFlags::MSTCP_FLAG_SENT_TUNNEL)
+            .map_err(|e| format!("mode: {e}"))
+    }
+
+    /// Mode adapter: TX ditahan ke antrian, RX diindikasikan ke MSSCP juga
+    /// diheld — bentuk yang disertakan (mf cap) apabila ndcap membaca penuh.
+    pub fn tunnel_txrx(&self, handle: HANDLE) -> Result<(), String> {
+        self.inner
+            .set_adapter_mode(
+                handle,
+                FilterFlags::MSTCP_FLAG_SENT_RECEIVE_TUNNEL,
+            )
+            .map_err(|e| format!("mode: {e}"))
+    }
+
     /// Mode adapter: frame MSTCP ditahan ke antrian user-mode (uji/lap).
     pub fn tunnel_tx(&self, handle: HANDLE) -> Result<(), String> {
         self.inner
@@ -169,6 +206,44 @@ impl NdisDevice {
     /// Kembalikan mode adapter ke default.
     pub fn restore_mode(&self, handle: HANDLE) {
         let _ = self.inner.set_adapter_mode(handle, FilterFlags::default());
+    }
+
+    /// Filter kernel: TX dst_mac di-drop (asal) dan kopinya masuk user-mode.
+    /// Drop membebaskan send kerjanya di stack (beda dengan REDIRECT yang
+    /// menahan NBL terontained sehingga send stack berangka di ~200 buffer).
+    pub fn capture_drop_rdr(&self, dst_mac: [u8; 6]) -> Result<(), String> {
+        let filter = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_SEND,
+            ndisapi::FILTER_PACKET_DROP_RDR,
+            FilterLayerFlags::DATA_LINK_LAYER_VALID,
+            DataLinkLayerFilter::new(
+                ETH_802_3,
+                DataLinkLayerFilterUnion {
+                    eth_8023_filter: Eth8023Filter::new(
+                        Eth802_3FilterFlags::ETH_802_3_DEST_ADDRESS,
+                        [0u8; 6],
+                        dst_mac,
+                        0u16,
+                    ),
+                },
+            ),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let pass_all = StaticFilter::new(
+            0u64,
+            DirectionFlags::PACKET_FLAG_ON_RECEIVE | DirectionFlags::PACKET_FLAG_ON_SEND,
+            FILTER_PACKET_PASS,
+            FilterLayerFlags::empty(),
+            DataLinkLayerFilter::default(),
+            ndisapi::NetworkLayerFilter::default(),
+            ndisapi::TransportLayerFilter::default(),
+        );
+        let table = StaticFilterTable::<2>::from_filters([filter, pass_all]);
+        self.inner
+            .set_packet_filter_table(&table)
+            .map_err(|e| format!("set_filter: {e}"))
     }
 
     /// Kosongkan tabel filter kernel (saat engine berhenti).

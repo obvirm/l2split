@@ -495,8 +495,18 @@ fn engine_bridge(app: &AppHandle) -> Result<(), String> {
         from_gw_mac,
         to_gw_mac,
         target_handle: crate::ndclient::AdapterHandle(target_handle),
+        from_name: from_n.clone(),
         cancel,
         shared,
+        drop_pass: false,
+        only_first: false,
+        only_from: true,
+        drop_all: false,
+        listen: false,
+        tunnel3: true,
+        tunnel1: false,
+        passno: false,
+        redirect: true,
     });
     Ok(())
 }
@@ -650,7 +660,20 @@ fn icon_rgba(path: &str) -> Option<(u32, u32, Vec<u8>)> {
 // ================= entry GUI =================
 
 pub fn run() -> Result<(), tauri::Error> {
-    tauri::Builder::default()
+    let r = tauri::Builder::default()
+        .on_window_event(|w, e| {
+            if let tauri::WindowEvent::CloseRequested { .. } = e {
+                let app = w.app_handle().clone();
+                let cancel = {
+                    let st = app.state::<AppState>();
+                    let g = st.cancel.lock().unwrap();
+                    g.clone()
+                };
+                if let Some(c) = cancel {
+                    c.store(true, Ordering::Relaxed);
+                }
+            }
+        })
         .setup(|app| {
             // paksa frameless (pengaman jika config tidak masuk)
             if let Some(w) = app.get_webview_window("main") {
@@ -682,5 +705,8 @@ pub fn run() -> Result<(), tauri::Error> {
             driver_setup,
             driver_teardown
         ])
-        .run(tauri::generate_context!())
+        .run(tauri::generate_context!());
+    // beri waktu engine berhenti rapi (restore mode + flush) sebelum proses mati
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    r
 }

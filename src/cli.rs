@@ -16,6 +16,7 @@ pub fn run_cli() {
     match cmd.as_str() {
         "list" => cmd_list(),
         "nd" => cmd_nd(),
+        "ndclear" => cmd_ndclear(),
         "ndcap" => cmd_ndcap(&args),
         "ndrun" => cmd_ndrun(&args),
         "apps" => cmd_apps(),
@@ -41,6 +42,7 @@ pub fn run_cli() {
             eprintln!("  observe <adapter-needle> [secs]");
             eprintln!("  run --from <ad> --to <ad> --app <exe>[,<exe>] [--secs N]");
             eprintln!("  nd     driver paket + daftar adapter");
+            eprintln!("  ndclear                        pemulihan: kosongkan filter + mode NORMAL");
             eprintln!("  ndcap <adapter-needle> --mac X [--secs N --tunnel --raw --alltx --verbose]");
             eprintln!("  ndrun --from <ad> --to <ad> --app <exe>[,<exe>] [--secs N]");
             std::process::exit(2);
@@ -192,8 +194,7 @@ fn cmd_lookup() {
 }
 
 /// nd: cek driver paket + daftar adapter TCP/IP-bound (diagnostik).
-fn cmd_nd() {
-    use crate::ndclient::NdisDevice;
+fn cmd_nd() {    use crate::ndclient::NdisDevice;
     let d = match NdisDevice::open() {
         Ok(d) => d,
         Err(e) => {
@@ -203,13 +204,45 @@ fn cmd_nd() {
     };
     println!("DRIVER: OK");
     let ads = d.adapters().expect("gagal enumerate adapter");
+    let ads2 = d.adapters().expect("gagal enumerate adapter (2)");
     println!("adapters TCP/IP-bound: {}", ads.len());
-    for a in &ads {
+    for (a, b) in ads.iter().zip(ads2.iter()) {
+        let mode = d.adapter_mode(a.handle).map(|m| format!("0x{m:X}")).unwrap_or_else(|| "fail".into());
+        let hw = d.hw_filter(a.handle).map(|m| format!("0x{m:X}")).unwrap_or_else(|| "fail".into());
         println!(
-            "  name={:<30} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-            a.name, a.mac[0], a.mac[1], a.mac[2], a.mac[3], a.mac[4], a.mac[5]
+            "  name={:<30} mac={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} h1=0x{:X} h2=0x{:X} {} mode={} hw={} q={}",
+            a.name, a.mac[0], a.mac[1], a.mac[2], a.mac[3], a.mac[4], a.mac[5],
+            a.handle.0 as usize as u64, b.handle.0 as usize as u64,
+            if a.handle.0 == b.handle.0 { "SAMA" } else { "BEDA" },
+            mode, hw,
+            d.queue_size(a.handle).unwrap_or(0),
         );
     }
+}
+
+/// ndclear: pemulihan paksa — mode semua adapter dikembalikan ke NORMAL dan
+/// tabel filter dikosongkan. Dipakai uninstaller + manusia saat butuh pulih.
+fn cmd_ndclear() {
+    use crate::ndclient::NdisDevice;
+    let d = match NdisDevice::open() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("ndclear: driver tidak bisa dibuka — {e}");
+            std::process::exit(1);
+        }
+    };
+    let ads = match d.adapters() {
+        Ok(v) => v,
+        Err(e) => {
+            println!("ndclear: enumerate gagal — {e}");
+            std::process::exit(1);
+        }
+    };
+    for a in &ads {
+        d.restore_mode(a.handle);
+    }
+    d.clear();
+    println!("ndclear: filter dikosongkan + mode NORMAL di {} adapter", ads.len());
 }
 
 /// ndcap: pasang static filter dst-MAC (TX), drain ke read, hitung total.
@@ -394,6 +427,15 @@ fn cmd_ndrun(args: &CmdArgs) {
             shared.set_app(name.trim(), true);
         }
     }
+    let drop_pass = args.flag("--drop-pass");
+    let only_first = args.flag("--only-first");
+    let only_from = args.flag("--only-from");
+    let drop_all = args.flag("--drop-all");
+    let listen = args.flag("--listen");
+    let tunnel3 = args.flag("--tunnel3");
+    let tunnel1 = args.flag("--tunnel1");
+    let passno = args.flag("--passno");
+    let redirect = args.flag("--redirect");
     let cancel = Arc::new(AtomicBool::new(false));
     println!("engine: from={from_n} to={to_n} apps={app} window={secs}s");
     let shared2 = shared.clone();
@@ -404,8 +446,18 @@ fn cmd_ndrun(args: &CmdArgs) {
             from_gw_mac,
             to_gw_mac,
             target_handle: th,
+            from_name: from_n.clone(),
             cancel: c2,
             shared,
+            drop_pass,
+            only_first,
+            only_from,
+            drop_all,
+            listen,
+            tunnel3,
+            tunnel1,
+            passno,
+            redirect,
         })
     });
     std::thread::sleep(Duration::from_secs(secs));

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  gen/driver.msi.wxs — MSI driver l2split (mengganti MSI pihak ketiga).
+  Sumber driver: pkg/ndislwf.inf + x64 Release (ndislwf.cat, NDISLWF.sys, NDISLWF.cer).
+  Service driver = NdisLwf (dari `AddService=NdisLwf` di INF). ComponentId: MS_NdisLwf.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="l2split Driver" Language="1033" Version="0.1.2"
+           Manufacturer="l2split" UpgradeCode="{8A4F2E9C-7D31-4A65-B2C8-91E204A6F3D7}">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Languages="1033" SummaryCodepage="1252" />
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="Versi [ProductName] terbaru sudah terpasang." />
+    <Media Id="1" Cabinet="ndis.cab" EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <Property Id="NETCFG" Value="C:\Windows\System32\netcfg.exe" />
+    <Property Id="CERTUTIL" Value="C:\Windows\System32\certutil.exe" />
+    <CustomAction Id="AddRootCert" Property="CERTUTIL" ExeCommand="-addstore -f Root &quot;[DRIVERS]NDISLWF.cer&quot;"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="AddPubCert" Property="CERTUTIL" ExeCommand="-addstore -f TrustedPublisher &quot;[DRIVERS]NDISLWF.cer&quot;"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="InstallDriver" Property="NETCFG" ExeCommand="-v -l &quot;[DRIVERS]ndislwf.inf&quot; -c s -i MS_NdisLwf"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="UninstallDriver" Property="NETCFG" ExeCommand="-v -u MS_NdisLwf"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RollbackInstall" Property="NETCFG" ExeCommand="-v -u MS_NdisLwf"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RollbackInstall" Before="InstallDriver" />
+      <Custom Action="AddRootCert" After="InstallFiles">NOT Installed</Custom>
+      <Custom Action="AddPubCert" After="AddRootCert">NOT Installed</Custom>
+      <Custom Action="InstallDriver" After="AddPubCert">NOT Installed</Custom>
+      <Custom Action="UninstallDriver" After="UnpublishComponents">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLLOCATION" Name="l2split">
+          <Directory Id="DRIVERS" Name="driver">
+            <Component Id="MainDriver" Guid="{D1E4C952-6FDD-4E7C-B38A-A24D1A5A9EAA}"
+                       Win64="yes" SharedDllRefCount="no" UninstallWhenSuperseded="no">
+              <File Id="ndislwf_inf" Source="E:\project\l2split\driver\ndislwf.inf" />
+              <File Id="ndislwf_sys" Source="E:\project\l2split\driver\NDISLWF.sys" />
+              <File Id="ndislwf_cat" Source="E:\project\l2split\driver\ndislwf.cat" />
+              <File Id="ndislwf_cer" Source="E:\project\l2split\driver\NDISLWF.cer" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="Driver" Level="1">
+      <ComponentRef Id="MainDriver" />
+    </Feature>
+  </Product>
+</Wix>

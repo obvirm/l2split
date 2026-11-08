@@ -2,11 +2,14 @@
 //!
 //! - Tanpa argumen -> buka GUI (Slint).
 //! - Dengan argumen (`list`, `run --app ...`, dll) -> mode CLI di konsol.
-// (windows_subsystem dinonaktifkan: CLI harus bisa keluar stdout saat dibangun release)
+// (tanpa jendela hitam di release: GUI mode tanpa argumen tidak membuka konsol;
+//  mode CLI masih dapat console induk lewat AttachConsole di bawah)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 fn main() {
     if std::env::args_os().len() > 1 {
-        // Mode CLI: attach ke konsol induk (release build = windowed subsystem).
+        // Mode CLI pada exe GUI (release = windowed): coba attach konsol induk.
+        // Otomasi yang butuh output file yang pasti pakai l2split_cli.exe.
         #[cfg(not(debug_assertions))]
         unsafe {
             const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF; // (DWORD)-1

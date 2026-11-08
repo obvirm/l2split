@@ -36,7 +36,6 @@ impl AdapterInfo for crate::ndclient::SniAdapter {
 pub struct CmdArgs {
     args: Vec<String>,
 }
-
 impl CmdArgs {
     pub fn new() -> Self {
         CmdArgs {
@@ -303,4 +302,30 @@ pub fn wait_event(
 pub fn reset_event(e: windows::Win32::Foundation::HANDLE) {
     use windows::Win32::System::Threading::ResetEvent;
     let _ = unsafe { ResetEvent(e) };
+}
+
+/// Leash mutex bernama antar-proses: hanya satu engine yang boleh hidup.
+/// None = sudah ada pemilik lain (atau tidak bisa dipastikan) — jangan mulai.
+pub struct EngineGuard {
+    _h: windows::Win32::Foundation::HANDLE,
+}
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self._h);
+        }
+    }
+}
+
+pub fn acquire_engine_mutex() -> Option<EngineGuard> {
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PWSTR;
+    let mut name: Vec<u16> = "Global\\L2SPLIT_ENGINE\0".encode_utf16().collect();
+    unsafe {
+        match CreateMutexW(None, true, PWSTR(name.as_mut_ptr())) {
+            Ok(h) => Some(EngineGuard { _h: h }),
+            Err(_) => None,
+        }
+    }
 }

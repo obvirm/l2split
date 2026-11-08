@@ -1,6 +1,6 @@
 [package]
 name = "l2split"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Pick any app — send it straight out the Ethernet, bypassing the VPN. An alternative split tunneling (per-app, layer 2)."
 license = "MIT"
@@ -40,3 +40,7 @@ tauri-build = { version = "2", features = [] }
 [[bin]]
 name = "l2split"
 path = "src/main.rs"
+
+[[bin]]
+name = "l2split_cli"
+path = "src/cli_main.rs"
